@@ -87,6 +87,11 @@ module CombinePDF
     attr_reader :outlines
     # Access the Names PDF object Hash (or reference). Use with care.
     attr_reader :names
+    # Enable or disable PDF/A compliance features (default: true)
+    # When true, adds ID and XMP metadata. OutputIntent is only added if needed.
+    # Set to false to disable PDF/A features:
+    #   pdf.enable_pdf_a = false
+    attr_accessor :enable_pdf_a
 
     def initialize(parser = nil)
       # default before setting
@@ -94,6 +99,7 @@ module CombinePDF
       @version = 0
       @viewer_preferences = {}
       @info = {}
+      @enable_pdf_a = true  # PDF/A compliance is opt-out (default enabled)
       parser ||= PDFParser.new(+'')
       raise TypeError, "initialization error, expecting CombinePDF::PDFParser or nil, but got #{parser.class.name}" unless parser.is_a? PDFParser
       @objects = parser.parse
@@ -213,6 +219,14 @@ module CombinePDF
       out << "<<\n/Root #{false || "#{catalog[:indirect_reference_id]} #{catalog[:indirect_generation_number]} R"}"
       out << "/Size #{indirect_object_count}"
       out << "/Info #{@info[:indirect_reference_id]} #{@info[:indirect_generation_number]} R"
+
+      # Generate and add file ID for PDF/A compliance (ISO 19005-1:2005 6.1.3)
+      # Only add if PDF/A mode is enabled
+      if @enable_pdf_a
+        file_ids = generate_file_id(out.join("\n"))
+        out << "/ID [<#{file_ids[0]}> <#{file_ids[1]}>]"
+      end
+
       out << ">>\nstartxref\n#{xref_location}\n%%EOF"
       # when finished, remove the numbering system and keep only pointers
       remove_old_ids

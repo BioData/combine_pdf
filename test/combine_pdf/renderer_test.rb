@@ -1,4 +1,6 @@
+require 'bundler/setup'
 require 'minitest/autorun'
+require 'combine_pdf'
 
 class CombinePDFRendererTest < Minitest::Test
 

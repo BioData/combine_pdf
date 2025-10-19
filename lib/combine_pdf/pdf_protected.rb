@@ -11,6 +11,7 @@ module CombinePDF
     protected
 
     include Renderer
+    include PDFASupport
 
     # RECORSIVE_PROTECTION = { Parent: true, Last: true}.freeze
 
@@ -161,6 +162,8 @@ module CombinePDF
       catalog[:Pages][:referenced_object][:Kids].each { |e| @objects << e[:referenced_object]; e[:referenced_object] }
       # adds every referenced object to the @objects (root), addition is performed as pointers rather then copies
       add_referenced()
+      # Add PDF/A compliance features (metadata, output intent) if enabled
+      add_pdfa_compliance(catalog) if @enable_pdf_a
       catalog
     end
 
