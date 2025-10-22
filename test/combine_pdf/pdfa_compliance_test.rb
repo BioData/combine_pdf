@@ -412,5 +412,169 @@ describe 'PDF/A Compliance' do
         assert_equal 0, annotation[:F], 'Flags should not be modified when PDF/A is disabled'
       end
     end
+
+    describe 'Font Embedding (ISO 19005-1:2005 6.3.4)' do
+      it 'detects non-embedded fonts' do
+        pdf = CombinePDF.new
+        page = pdf.new_page
+
+        # Create a non-embedded font (no FontDescriptor with FontFile)
+        non_embedded_font = {
+          Type: :Font,
+          Subtype: :Type1,
+          BaseFont: :Arial
+          # No FontDescriptor with FontFile - not embedded
+        }
+
+        # Add font to page resources
+        page[:Resources] = { Font: { F1: { is_reference_only: true, referenced_object: non_embedded_font } } }
+        pdf.objects << non_embedded_font
+
+        # After processing, the font should be replaced
+        pdf.to_pdf
+
+        # Check that the font reference was updated
+        fonts = page[:Resources][:Font]
+        new_font_ref = fonts[:F1]
+        new_font = new_font_ref[:referenced_object]
+
+        # Should be replaced with a standard font
+        refute_equal non_embedded_font, new_font, 'Non-embedded font should be replaced'
+        assert new_font[:BaseFont], 'Replacement font must have BaseFont'
+      end
+
+      it 'preserves embedded fonts' do
+        pdf = CombinePDF.new
+        page = pdf.new_page
+
+        # Create an embedded font (has FontDescriptor with FontFile2)
+        font_descriptor = {
+          Type: :FontDescriptor,
+          FontName: :'Helvetica-Bold',
+          FontFile2: { is_reference_only: true, referenced_object: { raw_stream_content: 'fake font data' } }
+        }
+
+        embedded_font = {
+          Type: :Font,
+          Subtype: :TrueType,
+          BaseFont: :'Helvetica-Bold',
+          FontDescriptor: { is_reference_only: true, referenced_object: font_descriptor }
+        }
+
+        page[:Resources] = { Font: { F1: { is_reference_only: true, referenced_object: embedded_font } } }
+        pdf.objects << embedded_font
+        pdf.objects << font_descriptor
+
+        # Process the PDF
+        pdf.to_pdf
+
+        # Embedded font should NOT be replaced
+        fonts = page[:Resources][:Font]
+        current_font = fonts[:F1][:referenced_object]
+
+        assert_equal embedded_font, current_font, 'Embedded fonts should be preserved'
+      end
+
+      it 'maps Arial to Helvetica' do
+        pdf = CombinePDF.new
+        page = pdf.new_page
+
+        arial_font = {
+          Type: :Font,
+          Subtype: :TrueType,
+          BaseFont: :Arial
+        }
+
+        page[:Resources] = { Font: { F1: { is_reference_only: true, referenced_object: arial_font } } }
+        pdf.objects << arial_font
+
+        pdf.to_pdf
+
+        # Arial should be replaced with Helvetica
+        replacement = page[:Resources][:Font][:F1][:referenced_object]
+        assert_equal :Helvetica, replacement[:BaseFont], 'Arial should map to Helvetica'
+      end
+
+      it 'maps Times New Roman to Times-Roman' do
+        pdf = CombinePDF.new
+        page = pdf.new_page
+
+        times_font = {
+          Type: :Font,
+          Subtype: :TrueType,
+          BaseFont: :TimesNewRoman
+        }
+
+        page[:Resources] = { Font: { F1: { is_reference_only: true, referenced_object: times_font } } }
+        pdf.objects << times_font
+
+        pdf.to_pdf
+
+        replacement = page[:Resources][:Font][:F1][:referenced_object]
+        assert_equal :'Times-Roman', replacement[:BaseFont], 'Times New Roman should map to Times-Roman'
+      end
+
+      it 'maps Courier New to Courier' do
+        pdf = CombinePDF.new
+        page = pdf.new_page
+
+        courier_font = {
+          Type: :Font,
+          Subtype: :TrueType,
+          BaseFont: :CourierNew
+        }
+
+        page[:Resources] = { Font: { F1: { is_reference_only: true, referenced_object: courier_font } } }
+        pdf.objects << courier_font
+
+        pdf.to_pdf
+
+        replacement = page[:Resources][:Font][:F1][:referenced_object]
+        assert_equal :Courier, replacement[:BaseFont], 'Courier New should map to Courier'
+      end
+
+      it 'preserves Type3 fonts (always embedded)' do
+        pdf = CombinePDF.new
+        page = pdf.new_page
+
+        type3_font = {
+          Type: :Font,
+          Subtype: :Type3,
+          FontBBox: [0, 0, 1000, 1000],
+          FontMatrix: [0.001, 0, 0, 0.001, 0, 0],
+          CharProcs: {}
+        }
+
+        page[:Resources] = { Font: { F1: { is_reference_only: true, referenced_object: type3_font } } }
+        pdf.objects << type3_font
+
+        pdf.to_pdf
+
+        # Type3 fonts should be preserved (they're always embedded)
+        current_font = page[:Resources][:Font][:F1][:referenced_object]
+        assert_equal type3_font, current_font, 'Type3 fonts should be preserved (always embedded)'
+      end
+
+      it 'does not replace fonts when PDF/A is disabled' do
+        pdf = CombinePDF.new
+        pdf.enable_pdf_a = false # Disable PDF/A
+        page = pdf.new_page
+
+        non_embedded_font = {
+          Type: :Font,
+          Subtype: :Type1,
+          BaseFont: :Arial
+        }
+
+        page[:Resources] = { Font: { F1: { is_reference_only: true, referenced_object: non_embedded_font } } }
+        pdf.objects << non_embedded_font
+
+        pdf.to_pdf
+
+        # Font should NOT be replaced when PDF/A is disabled
+        current_font = page[:Resources][:Font][:F1][:referenced_object]
+        assert_equal non_embedded_font, current_font, 'Fonts should not be replaced when PDF/A is disabled'
+      end
+    end
   end
 end

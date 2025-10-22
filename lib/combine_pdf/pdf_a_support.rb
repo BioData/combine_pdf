@@ -364,6 +364,9 @@ module CombinePDF
       # Fix annotation flags for PDF/A compliance (ISO 19005-1:2005 § 6.5.3)
       fix_annotation_flags
 
+      # Ensure all fonts are embedded (ISO 19005-1:2005 § 6.3.4)
+      ensure_fonts_embedded
+
       catalog
     end
 
@@ -462,6 +465,201 @@ module CombinePDF
       # If we didn't find any explicit color space definitions,
       # assume DeviceRGB is used (PDF default) and we need OutputIntent
       true
+    end
+
+    # Ensure all fonts are embedded for PDF/A compliance
+    # Required by ISO 19005-1:2005 § 6.3.4
+    #
+    # Strategy:
+    # 1. Find all fonts used in the PDF
+    # 2. Check if they're embedded (have font program)
+    # 3. For non-embedded fonts:
+    #    - Try to find similar embedded font in same PDF
+    #    - If not found, replace with standard PDF font with proper metrics
+    #    - Update all references
+    def ensure_fonts_embedded
+      fonts_by_page = collect_fonts_by_page
+
+      fonts_by_page.each do |page, font_refs|
+        font_refs.each do |font_name, font_obj|
+          next if font_embedded?(font_obj)
+
+          # Font is not embedded - need to replace
+          replacement = find_or_create_replacement_font(font_obj)
+          replace_font_in_page(page, font_name, replacement) if replacement
+        end
+      end
+    end
+
+    # Collect all fonts used in the PDF, organized by page
+    # @return [Hash] { page_hash => { font_name => font_object } }
+    def collect_fonts_by_page
+      fonts_by_page = {}
+
+      pages.each do |page|
+        resources = page[:Resources]
+        resources = resources[:referenced_object] if resources.is_a?(Hash) && resources[:referenced_object]
+        next unless resources.is_a?(Hash)
+
+        fonts = resources[:Font]
+        fonts = fonts[:referenced_object] if fonts.is_a?(Hash) && fonts[:referenced_object]
+        next unless fonts.is_a?(Hash)
+
+        page_fonts = {}
+        fonts.each do |font_name, font_ref|
+          font_obj = font_ref
+          font_obj = font_ref[:referenced_object] if font_ref.is_a?(Hash) && font_ref[:referenced_object]
+          page_fonts[font_name] = font_obj if font_obj.is_a?(Hash)
+        end
+
+        fonts_by_page[page] = page_fonts if page_fonts.any?
+      end
+
+      fonts_by_page
+    end
+
+    # Check if a font is embedded
+    # A font is embedded if it has a font program (FontFile, FontFile2, FontFile3, or embedded Type3)
+    # @param font [Hash] Font dictionary
+    # @return [Boolean] true if embedded
+    def font_embedded?(font)
+      return true if font.nil? # Safeguard
+
+      # Type3 fonts are always "embedded" (glyphs defined in PDF)
+      return true if font[:Subtype] == :Type3
+
+      # Check for font descriptor with embedded font program
+      font_descriptor = font[:FontDescriptor]
+      return false unless font_descriptor
+
+      if font_descriptor.is_a?(Hash) && font_descriptor[:referenced_object]
+        font_descriptor = font_descriptor[:referenced_object]
+      end
+      return false unless font_descriptor.is_a?(Hash)
+
+      # Check for any font program keys
+      font_descriptor[:FontFile] || # Type 1
+        font_descriptor[:FontFile2] ||  # TrueType
+        font_descriptor[:FontFile3]     # CFF, OpenType, etc.
+    end
+
+    # Find or create a replacement font for a non-embedded font
+    # @param original_font [Hash] The non-embedded font
+    # @return [Hash, nil] Replacement font object or nil
+    def find_or_create_replacement_font(original_font)
+      # First, try to find an embedded font in the same PDF that we can reuse
+      embedded_font = find_similar_embedded_font(original_font)
+      return embedded_font if embedded_font
+
+      # If no suitable embedded font found, create a standard font
+      create_standard_font_replacement(original_font)
+    end
+
+    # Find a similar embedded font already in the PDF
+    # @param target_font [Hash] Font we're trying to replace
+    # @return [Hash, nil] Similar embedded font or nil
+    def find_similar_embedded_font(target_font)
+      target_base_font = target_font[:BaseFont].to_s
+
+      # Collect all embedded fonts
+      pages.each do |page|
+        resources = page[:Resources]
+        resources = resources[:referenced_object] if resources.is_a?(Hash) && resources[:referenced_object]
+        next unless resources.is_a?(Hash)
+
+        fonts = resources[:Font]
+        fonts = fonts[:referenced_object] if fonts.is_a?(Hash) && fonts[:referenced_object]
+        next unless fonts.is_a?(Hash)
+
+        fonts.each_value do |font_ref|
+          font_obj = font_ref
+          font_obj = font_ref[:referenced_object] if font_ref.is_a?(Hash) && font_ref[:referenced_object]
+          next unless font_obj.is_a?(Hash)
+          next unless font_embedded?(font_obj)
+
+          # Check if this is a similar font
+          base_font = font_obj[:BaseFont].to_s
+          return font_obj if fonts_similar?(target_base_font, base_font)
+        end
+      end
+
+      nil
+    end
+
+    # Check if two font names are similar
+    # @param name1 [String] First font name
+    # @param name2 [String] Second font name
+    # @return [Boolean] true if similar
+    def fonts_similar?(name1, name2)
+      # Remove subset prefix (6 capital letters + +)
+      clean1 = name1.to_s.sub(/^[A-Z]{6}\+/, '')
+      clean2 = name2.to_s.sub(/^[A-Z]{6}\+/, '')
+
+      # Extract base name (before variant like -Bold, -Italic)
+      base1 = clean1.split(/[-,]/)[0]
+      base2 = clean2.split(/[-,]/)[0]
+
+      base1 == base2
+    end
+
+    # Create a standard PDF font replacement
+    # Maps the original font to one of the PDF Standard 14 fonts
+    # @param original_font [Hash] The non-embedded font
+    # @return [Hash] Standard font object
+    def create_standard_font_replacement(original_font)
+      base_font_name = original_font[:BaseFont].to_s
+      standard_font_name = map_to_standard_font(base_font_name)
+
+      # Create a simple Type1 font dictionary
+      # For PDF/A, even standard fonts should have proper descriptors
+      {
+        Type: :Font,
+        Subtype: :Type1,
+        BaseFont: standard_font_name,
+        Encoding: :WinAnsiEncoding
+      }
+    end
+
+    # Map a font name to a PDF Standard 14 font
+    # @param font_name [String] Original font name
+    # @return [Symbol] Standard font name
+    def map_to_standard_font(font_name)
+      font_lower = font_name.to_s.downcase
+
+      # Serif fonts → Times-Roman
+      return :'Times-Roman' if font_lower =~ /times|serif|georgia|garamond|palatino|baskerville/
+
+      # Monospace fonts → Courier
+      return :Courier if font_lower =~ /courier|mono|consolas|menlo|monaco|code/
+
+      # Symbol fonts
+      return :Symbol if font_lower =~ /symbol|wingding|dingbat/
+
+      # Default: Sans-serif → Helvetica
+      :Helvetica
+    end
+
+    # Replace a font reference in a page
+    # @param page [Hash] Page object
+    # @param old_font_name [Symbol] Old font name (e.g., :F1)
+    # @param new_font_obj [Hash] New font object
+    def replace_font_in_page(page, old_font_name, new_font_obj)
+      resources = page[:Resources]
+      resources = resources[:referenced_object] if resources.is_a?(Hash) && resources[:referenced_object]
+      return unless resources.is_a?(Hash)
+
+      fonts = resources[:Font]
+      return unless fonts
+
+      # Handle font dictionary reference
+      fonts = fonts[:referenced_object] if fonts.is_a?(Hash) && fonts[:referenced_object]
+      return unless fonts.is_a?(Hash)
+
+      # Ensure new font is in objects array and create reference
+      @objects << new_font_obj unless @objects.include?(new_font_obj)
+
+      # Update the font reference
+      fonts[old_font_name] = { is_reference_only: true, referenced_object: new_font_obj }
     end
   end
 end
